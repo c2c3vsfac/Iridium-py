@@ -11,4 +11,4 @@ Move the directoty `proto/` and file `packetIds.json` and `Keys.json` into this 
 
 Due to the python project run slower than others, this project is useless, recommend to use the original one. You can click the link [Iridium](https://github.com/Crepe-Inc/Iridium) and [Iridium-NG](https://github.com/Akka0/Iridium-NG) to get it, unless you want to try to improve this project's speed.
 
-
+pypy is useless,it runs even slower upon most occasions.
