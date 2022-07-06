@@ -4,7 +4,7 @@ import struct
 import base64
 
 
-def find_need_import(file):
+def read_proto(file):
     try:
         f = open(file, "r")
         lines = f.readlines()
@@ -12,86 +12,78 @@ def find_need_import(file):
     except FileNotFoundError:
         print("找不到文件：" + file)
         return False
+    proto_name = os.path.basename(file).split(".")[0]
     need_import = []
-    for j in lines:
-        if j.startswith("import"):
-            file_whole_name = re.findall(r'"(.*)"', re.split(" ", j)[1])[0]
-            file_name = re.sub(".proto", "", file_whole_name)
-            need_import.append(file_name)
-    return need_import
-
-
-def find_start_line(file, *args):
-    start_line = 0
-    for i, j in enumerate(file):
-        if j.endswith("{\n"):
-            if args:
-                split_line = re.split(" ", j)
-                second = split_line[1]
-                if second in args[0]:
-                    start_line = i + 1
-                    break
-                else:
-                    continue
-            start_line = i + 1
-            break
-    return start_line
-
-
-def read_proto(file, *args):
-    f = open(file, "r")
-    lines = f.readlines()
-    f.close()
-    if args:
-        start_line = find_start_line(lines, args[0])
-    else:
-        start_line = find_start_line(lines)
+    enum_dict = {}
     return_dict = {}
     prop_name = {}
-    for k in range(start_line, len(lines)):
-        split_line = re.split(" ", lines[k])
-        if len(split_line) == 4:
+    message_return_dict = {}
+    message_prop_name = {}
+    other_message = {}
+    save = False
+    for line in lines:
+        if line.startswith("import"):
+            file_whole_name = re.findall(r'"(.*)"', re.split(" ", line)[1])[0]
+            file_name = re.sub(".proto", "", file_whole_name)
+            need_import.append(file_name)
+        else:
+            split_line = re.split(" ", line)
             data_type = re.sub("\\t", "", split_line[0])
-            if not data_type == "option":
-                prop = split_line[1]
-                data_id = int(re.findall("\d+", split_line[3])[0])
-                return_dict[data_id] = data_type
-                prop_name[data_id] = prop
-        elif len(split_line) == 5:  # repeated and map
-            wire_type = re.sub("\\t", "", split_line[0])
-            if wire_type == "repeated":
-                data_type = split_line[1]
-                prop = split_line[2]
-                data_id = int(re.findall("\d+", split_line[4])[0])
-                return_dict[data_id] = "repeated_" + data_type
-                prop_name[data_id] = prop
+            if data_type == "}\n":
+                save = False
+                return_dict = {}
+                prop_name = {}
+                continue
+            elif data_type == "message" or data_type == "enum":
+                save = False
+                return_dict = {}
+                prop_name = {}
+            if save:
+                if save == "enum":  # 1个proto2个enum?自己改吧。
+                    data_id = int(re.findall("\d+", split_line[2])[0])
+                    enum_dict[data_id] = data_type
+                else:
+                    if len(split_line) > 3:  # 空行,忽略oneof
+                        if len(split_line) == 4:
+                            prop = split_line[1]
+                            data_id = int(re.findall("\d+", split_line[3])[0])
+                            return_dict[data_id] = data_type
+                            prop_name[data_id] = prop
+                        elif len(split_line) == 5:  # repeated and map
+                            wire_type = re.sub("\\t", "", split_line[0])
+                            if wire_type == "repeated":
+                                data_type = split_line[1]
+                                prop = split_line[2]
+                                data_id = int(re.findall("\d+", split_line[4])[0])
+                                return_dict[data_id] = "repeated_" + data_type
+                                prop_name[data_id] = prop
+                            else:
+                                data_type = wire_type + split_line[1]
+                                prop = split_line[2]
+                                data_id = int(re.findall("\d+", split_line[4])[0])
+                                return_dict[data_id] = data_type
+                                prop_name[data_id] = prop
+                    if save == "message":
+                        message_return_dict = return_dict
+                        message_prop_name = prop_name
+                    else:
+                        if save not in other_message:
+                            other_message[save] = [{}, {}]
+                        other_message[save][0].update(return_dict)
+                        other_message[save][1].update(prop_name)
+
             else:
-                data_type = wire_type + split_line[1]
-                prop = split_line[2]
-                data_id = int(re.findall("\d+", split_line[4])[0])
-                return_dict[data_id] = data_type
-                prop_name[data_id] = prop
-    return return_dict, prop_name
-
-
-def enum_handle(name, file):
-    f = open(file, "r")
-    lines = f.readlines()
-    f.close()
-    start_line = 0
-    enum_dict = {}
-    for i, j in enumerate(lines):
-        if j.startswith("\tenum") or j.startswith("enum"):
-            if re.split(" ", lines[i])[1] == name:
-                start_line = i + 1
-    for k in range(start_line, len(lines)):
-        if lines[k].startswith("\t}") or lines[k].startswith("}"):
-            break
-        split_line = re.split(" ", lines[k])
-        data_type = re.sub("\\t", "", split_line[0])
-        data_id = int(re.findall("\d+", split_line[2])[0])
-        enum_dict[data_id] = data_type
-    return enum_dict
+                if data_type == "message":
+                    if split_line[1] == proto_name:
+                        save = "message"
+                    else:
+                        save = split_line[1]
+                    continue
+                elif data_type == "enum":
+                    save = "enum"
+                else:
+                    continue
+    return need_import, enum_dict, message_return_dict, message_prop_name, other_message
 
 
 def judge_type(prop_name):
@@ -122,25 +114,19 @@ def varint(now_location, byte_str):
 
 
 def parse(byte_str, proto_name, *args):
-    # len(args) == 1  传需要导入或嵌套的类型
-    # len(args) == 2  传map的类型
+    # len(args) == 2  传map的类型或嵌套message
     # len(args) == 3  传repeated的类型和data_id = 1
     # print(byte_str)
     # print(proto_name)
     file_path = os.getcwd()
     proto_name = file_path + "\proto\\" + proto_name + ".proto"
-    need_import = find_need_import(proto_name)
-    if not need_import and not need_import == []:
-        return False
+    need_import, enum_dict, encoding_rules, prop_name, other_message = read_proto(proto_name)
+    # if not need_import and not need_import == []:
+    #     return False
     if args:
-        if len(args) == 1:
-            encoding_rules, prop_name = read_proto(proto_name, args[0])
-        elif len(args) == 2:
-            encoding_rules, prop_name = args[0], args[1]
-        else:
-            encoding_rules, prop_name = args[0], args[1]
-    else:
-        encoding_rules, prop_name = read_proto(proto_name)
+        encoding_rules, prop_name = args[0], args[1]
+    # else:
+    #     encoding_rules, prop_name = read_proto(proto_name)
     decode_data = {}
     if len(args) == 3:
         list_decode_data = {"1": []}
@@ -155,7 +141,7 @@ def parse(byte_str, proto_name, *args):
             data_id >>= 3
             i += offset
             i += 1
-        if data_id in encoding_rules and data_id in prop_name:
+        if data_id in encoding_rules:
             if data_type == 0:
                 data, offset = varint(i, byte_str)
                 int_type_list = ["int32", "int64", "uint32", "uint64", "sint32", "sint64"]
@@ -166,9 +152,7 @@ def parse(byte_str, proto_name, *args):
                 else:
                     if encoding_rules[data_id] in need_import:
                         proto_name = file_path + "\proto\\" + encoding_rules[data_id] + ".proto"
-                        enum_dict = enum_handle(encoding_rules[data_id], proto_name)
-                    else:
-                        enum_dict = enum_handle(encoding_rules[data_id], proto_name)
+                        enum_dict = read_proto(proto_name)[1]
                     data = enum_dict[data]
                 decode_data[prop_name[data_id]] = data
                 i += offset
@@ -235,10 +219,12 @@ def parse(byte_str, proto_name, *args):
                 elif encoding_rules[data_id] in need_import:
                     decode_data[prop_name[data_id]] = []
                     decode_data[prop_name[data_id]].append(parse(byte_str[i: i + length], encoding_rules[data_id]))
-                else:
+                elif encoding_rules[data_id] in other_message:
                     decode_data[prop_name[data_id]] = []
-                    decode_data[prop_name[data_id]].append(parse(byte_str[i: i + length], encoding_rules[data_id],
-                                                                 prop_name[data_id]))
+                    proto_name = os.path.basename(proto_name).split(".")[0]
+                    decode_data[prop_name[data_id]].append(parse(byte_str[i: i + length], proto_name,
+                                                                 other_message[encoding_rules[data_id]][0],
+                                                                 other_message[encoding_rules[data_id]][1]))
                 i += length
             else:
                 print("protobuf该处字节解析失败：" + str(i))
@@ -249,9 +235,6 @@ def parse(byte_str, proto_name, *args):
     if len(args) == 3:
         decode_data = list_decode_data["1"]
     return decode_data
-
-
-
 
 # b_data = b'\x89\xab\xc2\xb6\xcd\x05\x96@\xc2\x0cR"\xcfa\xa8\x9a\x10\xf1\xc6{\x90\x10\xc9\x0f\xd3\x94\x9c\nr\x8cse\xa4\xf6\xb4\xed\xfbC@\x8a\xf3\xb6\xe2\xfe\xf1{\xfc\x0fVq\x8ct"\xea&*\x9d\xff/\x1c\xd5\x94O\xa0\x06\xee\xae\xd7\t\x8f\xd5l\xc2\x0c\x81O\x99\xa5\x8a\xb8_?x+\xb2@\xae\x05\xd1\xb9Z J\xb5\x96\x1e\xd8\xfa\x85\x14\xf4Y\x9a\xcb\x8dUZV\xc8\xa1\xf1}\xb1q\xe4A\xe5\x01pE\xa6u\xb3\xe4l\x04\x19\xc3\x1c2\xdf\xf4e\x1f5v\x08\xa5\xd0\x86%i\xe7?\xb7\xe8R\xe5;1\r-y\x7f\xeaD\x15\x85\x9c\xff\xfd\x96&\xfc;\xce'
 #
@@ -274,5 +257,4 @@ def parse(byte_str, proto_name, *args):
 # print(data, offset)
 
 # print(parse(b_data, "WorldPlayerRTTNotify"))
-
 
